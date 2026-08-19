@@ -1,0 +1,35 @@
+{
+  "app": {
+    "name": "myapp",
+    "version": "1.0.0",
+    "debug": false,
+    "port": 3000,
+    "log_level": "info"
+  },
+  "database": {
+    "host": "db.staging.internal",
+    "port": 5432,
+    "name": "myapp_staging",
+    "username": "staging_user",
+    "password": "staging_password_456",
+    "pool_size": 20,
+    "ssl": true
+  },
+  "cache": {
+    "enabled": true,
+    "host": "cache.staging.internal",
+    "port": 6379,
+    "ttl": 600
+  },
+  "api": {
+    "base_url": "https://staging.example.com/api",
+    "timeout": 30,
+    "retries": 3,
+    "api_key": "staging_api_key_67890"
+  },
+  "features": {
+    "new_dashboard": true,
+    "beta_features": false,
+    "analytics": true
+  }
+}

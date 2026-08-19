@@ -1,0 +1,35 @@
+{
+  "app": {
+    "name": "myapp",
+    "version": "1.0.0",
+    "debug": false,
+    "port": 3000,
+    "log_level": "warn"
+  },
+  "database": {
+    "host": "db.prod.internal",
+    "port": 5432,
+    "name": "myapp_prod",
+    "username": "prod_user",
+    "password": "prod_password_789",
+    "pool_size": 100,
+    "ssl": true
+  },
+  "cache": {
+    "enabled": true,
+    "host": "cache.prod.internal",
+    "port": 6379,
+    "ttl": 1800
+  },
+  "api": {
+    "base_url": "https://api.example.com",
+    "timeout": 60,
+    "retries": 5,
+    "api_key": "prod_api_key_11111"
+  },
+  "features": {
+    "new_dashboard": false,
+    "beta_features": false,
+    "analytics": true
+  }
+}

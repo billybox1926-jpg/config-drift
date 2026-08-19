@@ -1,0 +1,35 @@
+{
+  "app": {
+    "name": "myapp",
+    "version": "1.0.0",
+    "debug": true,
+    "port": 3000,
+    "log_level": "debug"
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "myapp_dev",
+    "username": "dev_user",
+    "password": "dev_password_123",
+    "pool_size": 5,
+    "ssl": false
+  },
+  "cache": {
+    "enabled": true,
+    "host": "localhost",
+    "port": 6379,
+    "ttl": 300
+  },
+  "api": {
+    "base_url": "http://localhost:3000/api",
+    "timeout": 30,
+    "retries": 3,
+    "api_key": "dev_api_key_12345"
+  },
+  "features": {
+    "new_dashboard": true,
+    "beta_features": true,
+    "analytics": false
+  }
+}
