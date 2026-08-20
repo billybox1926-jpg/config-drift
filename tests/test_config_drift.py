@@ -209,6 +209,48 @@ class TestPropertiesEscapes(unittest.TestCase):
             os.unlink(path)
 
 
+class TestFindConfigFiles(unittest.TestCase):
+    def test_directory_structure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "dev").mkdir()
+            (root / "staging").mkdir()
+            (root / "prod").mkdir()
+            (root / "dev" / "app.json").write_text("{}")
+            (root / "staging" / "app.json").write_text("{}")
+            (root / "prod" / "app.json").write_text("{}")
+
+            result = config_drift.find_config_files(root, ["dev", "staging", "prod"])
+            self.assertIn("dev", result)
+            self.assertIn("staging", result)
+            self.assertIn("prod", result)
+            self.assertEqual(len(result["dev"]), 1)
+
+    def test_flat_structure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "app.dev.json").write_text("{}")
+            (root / "app.staging.json").write_text("{}")
+            (root / "app.prod.json").write_text("{}")
+
+            result = config_drift.find_config_files(root, ["dev", "staging", "prod"])
+            self.assertIn("dev", result)
+            self.assertIn("staging", result)
+            self.assertIn("prod", result)
+
+    def test_flat_structure_no_false_positive(self):
+        """Files like 'deviant.json' should NOT match env 'dev'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "deviant.json").write_text("{}")
+            (root / "my.dev.json").write_text("{}")
+
+            result = config_drift.find_config_files(root, ["dev"])
+            self.assertIn("dev", result)
+            self.assertEqual(len(result["dev"]), 1)
+            self.assertEqual(result["dev"][0].name, "my.dev.json")
+
+
 class TestNormalizeForComparison(unittest.TestCase):
     """Test normalize_for_comparison preserves int vs float."""
 

@@ -190,10 +190,13 @@ def find_config_files(root: Path, environments: list[str]) -> dict[str, list[Pat
 
     if not result:
         for env in environments:
+            # Use regex to match .env at end of stem (e.g., app.dev.json -> stem "app.dev")
+            # This avoids matching files like "deviant.json" for env "dev"
+            env_regex = re.compile(rf"^[^.]*\.{re.escape(env)}$")
             files = sorted(
                 p
                 for p in root.glob("*")
-                if p.suffix.lower() in SUPPORTED_FORMATS and f".{env}" in p.stem
+                if p.suffix.lower() in SUPPORTED_FORMATS and env_regex.match(p.stem)
             )
             if files:
                 result[env] = files

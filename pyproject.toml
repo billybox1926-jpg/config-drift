@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "config-drift"
-version = "0.1.0"
+version = "0.1.1"
 description = "Detect configuration drift across environments"
 readme = "README.md"
 license = {text = "MIT"}
@@ -19,6 +19,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 requires-python = ">=3.9"
+
+[project.scripts]
+config-drift = "config_drift:main"
 
 [tool.ruff]
 target-version = "py39"
