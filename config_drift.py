@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 SUPPORTED_FORMATS = (".json", ".properties", ".toml", ".yaml", ".yml")
 
@@ -23,6 +23,8 @@ SECRET_PATTERN = re.compile(
     r"(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|auth)",
     re.IGNORECASE,
 )
+
+SAFE_ENV_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 # Try importing optional parsers (ok if absent)
 try:
@@ -170,6 +172,11 @@ def is_secret_key(key: str, pattern: re.Pattern = SECRET_PATTERN) -> bool:
     return bool(pattern.search(key))
 
 
+def validate_env_name(env: str) -> bool:
+    """Validate environment name to prevent path traversal."""
+    return bool(SAFE_ENV_PATTERN.match(env))
+
+
 def find_config_files(root: Path, environments: list[str]) -> dict[str, list[Path]]:
     """Find config files in a directory tree."""
     result: dict[str, list[Path]] = {}
@@ -194,89 +201,121 @@ def find_config_files(root: Path, environments: list[str]) -> dict[str, list[Pat
     return result
 
 
-def normalize_for_comparison(value: Any) -> Any:
-    """Normalize a value for comparison (handle int vs float)."""
+def normalize_for_comparison(value: Any) -> tuple[str, Any]:
+    """Normalize a value for comparison, returning (type_name, comparable_value).
+
+    Preserves int vs float distinction to detect type drift.
+    Bools are handled before int check since bool is a subclass of int.
+    """
     if isinstance(value, bool):
-        return value
+        return ("bool", value)
     if isinstance(value, int):
-        return float(value)
-    return value
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, str):
+        return ("str", value)
+    return (type(value).__name__, value)
 
 
 def compare_environments(
-    configs: dict[str, dict[str, Any]],
+    env_file_configs: dict[str, dict[str, dict[str, Any]]],
     secret_pattern: re.Pattern = SECRET_PATTERN,
-) -> list[dict[str, Any]]:
-    """Compare flattened configs across environments."""
-    all_keys: set[str] = set()
-    for flat in configs.values():
-        all_keys.update(flat.keys())
+) -> dict[str, list[dict[str, Any]]]:
+    """Compare flattened configs across environments, per file.
 
-    drifts: list[dict[str, Any]] = []
-    for key in sorted(all_keys):
-        present: dict[str, Any] = {}
-        missing: list[str] = []
-        for env, flat in configs.items():
-            if key in flat:
-                present[env] = flat[key]
-            else:
-                missing.append(env)
+    Args:
+        env_file_configs: {env_name: {file_name: {flat_key: value}}}
 
-        if not present:
-            continue
+    Returns:
+        {file_name: [drift_entries]}
+    """
+    # Collect all file names and all keys per file
+    all_files: set[str] = set()
+    all_keys_by_file: dict[str, set[str]] = {}
+    for env, file_configs in env_file_configs.items():
+        for file_name, flat in file_configs.items():
+            all_files.add(file_name)
+            if file_name not in all_keys_by_file:
+                all_keys_by_file[file_name] = set()
+            all_keys_by_file[file_name].update(flat.keys())
 
-        normalized_values: dict[str, Any] = {}
-        for env, v in present.items():
-            normalized_values[env] = normalize_for_comparison(v)
+    result: dict[str, list[dict[str, Any]]] = {}
 
-        first_env = next(iter(normalized_values))
-        first_normalized = normalized_values[first_env]
-        has_value_drift = any(
-            v != first_normalized
-            for env, v in normalized_values.items()
-            if env != first_env
-        )
+    for file_name in sorted(all_files):
+        all_keys = all_keys_by_file[file_name]
+        drifts: list[dict[str, Any]] = []
 
-        type_names: dict[str, str] = {
-            env: type(v).__name__ for env, v in present.items()
-        }
-        has_type_drift = len(set(type_names.values())) > 1
-
-        if has_value_drift or has_type_drift or missing:
-            formatted_values = {}
-            for env, v in present.items():
-                if is_secret_key(key, secret_pattern):
-                    formatted_values[env] = "***"
-                elif has_type_drift:
-                    formatted_values[env] = f"{v} ({type_names[env]})"
+        for key in sorted(all_keys):
+            present: dict[str, Any] = {}
+            missing: list[str] = []
+            for env, file_configs in env_file_configs.items():
+                flat = file_configs.get(file_name, {})
+                if key in flat:
+                    present[env] = flat[key]
                 else:
-                    formatted_values[env] = str(v)
+                    missing.append(env)
 
-            if missing:
-                entry_type = "missing_key"
-            elif has_type_drift:
-                entry_type = "type_drift"
-            else:
-                entry_type = "value_drift"
+            if not present:
+                continue
 
-            entry = {
-                "key": key,
-                "type": entry_type,
-                "secret": is_secret_key(key, secret_pattern),
-                "values": formatted_values,
-                "missing_in": sorted(missing),
+            # Check for value drift using normalized comparison
+            normalized_values: dict[str, tuple[str, Any]] = {}
+            for env, v in present.items():
+                normalized_values[env] = normalize_for_comparison(v)
+
+            first_env = next(iter(normalized_values))
+            first_type, first_normalized = normalized_values[first_env]
+            has_value_drift = any(
+                v != first_normalized
+                for env, (_, v) in normalized_values.items()
+                if env != first_env
+            )
+
+            # Check for type drift
+            type_names: dict[str, str] = {
+                env: tn for env, (tn, _) in normalized_values.items()
             }
-            if has_type_drift:
-                entry["type_names"] = type_names
-            drifts.append(entry)
+            has_type_drift = len(set(type_names.values())) > 1
 
-    return drifts
+            if has_value_drift or has_type_drift or missing:
+                formatted_values = {}
+                for env, v in present.items():
+                    if is_secret_key(key, secret_pattern):
+                        formatted_values[env] = "***"
+                    elif has_type_drift:
+                        formatted_values[env] = f"{v} ({type_names[env]})"
+                    else:
+                        formatted_values[env] = str(v)
+
+                if missing:
+                    entry_type = "missing_key"
+                elif has_type_drift:
+                    entry_type = "type_drift"
+                else:
+                    entry_type = "value_drift"
+
+                entry = {
+                    "key": key,
+                    "type": entry_type,
+                    "secret": is_secret_key(key, secret_pattern),
+                    "values": formatted_values,
+                    "missing_in": sorted(missing),
+                }
+                if has_type_drift:
+                    entry["type_names"] = type_names
+                drifts.append(entry)
+
+        if drifts:
+            result[file_name] = drifts
+
+    return result
 
 
 def generate_terminal_report(
     configs_root: str,
     environments: list[str],
-    file_groups: dict[str, dict[str, list[dict[str, Any]]]],
+    file_drifts: dict[str, list[dict[str, Any]]],
     summary: dict[str, int],
 ) -> str:
     """Generate a terminal-friendly drift report."""
@@ -287,16 +326,15 @@ def generate_terminal_report(
         "",
     ]
 
-    for file_key, env_drifts in file_groups.items():
-        lines.append(f"File: {file_key}")
-        for drifts in env_drifts.values():
-            for drift in drifts:
-                label = drift["type"].replace("_", " ").upper()
-                lines.append(f"  [{label}] {drift['key']}")
-                for env, value in drift["values"].items():
-                    lines.append(f"    {env + ':':12} {value}")
-                if drift["missing_in"]:
-                    lines.append(f"    missing in: {', '.join(drift['missing_in'])}")
+    for file_name, drifts in file_drifts.items():
+        lines.append(f"File: {file_name}")
+        for drift in drifts:
+            label = drift["type"].replace("_", " ").upper()
+            lines.append(f"  [{label}] {drift['key']}")
+            for env, value in drift["values"].items():
+                lines.append(f"    {env + ':':12} {value}")
+            if drift["missing_in"]:
+                lines.append(f"    missing in: {', '.join(drift['missing_in'])}")
         lines.append("")
 
     lines.append("Summary:")
@@ -310,14 +348,14 @@ def generate_terminal_report(
 def generate_json_report(
     configs_root: str,
     environments: list[str],
-    file_groups: dict[str, dict[str, list[dict[str, Any]]]],
+    file_drifts: dict[str, list[dict[str, Any]]],
     summary: dict[str, int],
 ) -> str:
     """Generate a JSON drift report."""
     files_output = []
-    for file_key, env_drifts in file_groups.items():
-        drifts = []
-        for drift in env_drifts.get("__all__", []):
+    for file_name, drifts in file_drifts.items():
+        entries = []
+        for drift in drifts:
             entry = {
                 "key": drift["key"],
                 "type": drift["type"],
@@ -327,8 +365,8 @@ def generate_json_report(
             }
             if drift.get("type_names"):
                 entry["type_names"] = drift["type_names"]
-            drifts.append(entry)
-        files_output.append({"file": file_key, "drifts": drifts})
+            entries.append(entry)
+        files_output.append({"file": file_name, "drifts": entries})
 
     report = {
         "configs_root": configs_root,
@@ -342,7 +380,7 @@ def generate_json_report(
 def generate_markdown_report(
     configs_root: str,
     environments: list[str],
-    file_groups: dict[str, dict[str, list[dict[str, Any]]]],
+    file_drifts: dict[str, list[dict[str, Any]]],
     summary: dict[str, int],
 ) -> str:
     """Generate a Markdown drift report."""
@@ -354,10 +392,10 @@ def generate_markdown_report(
         "",
     ]
 
-    for file_key, env_drifts in file_groups.items():
-        lines.append(f"## {file_key}")
+    for file_name, drifts in file_drifts.items():
+        lines.append(f"## {file_name}")
         lines.append("")
-        for drift in env_drifts.get("__all__", []):
+        for drift in drifts:
             label = drift["type"].replace("_", " ").title()
             lines.append(f"### `{drift['key']}` ({label})")
             lines.append("")
@@ -376,66 +414,6 @@ def generate_markdown_report(
     return "\n".join(lines)
 
 
-def _unflatten(flat: dict[str, Any]) -> dict[str, Any]:
-    """Convert dot-notation keys back to nested dict."""
-    result: dict[str, Any] = {}
-    for key, value in flat.items():
-        parts = key.split(".")
-        current = result
-        for part in parts[:-1]:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-        current[parts[-1]] = value
-    return result
-
-
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    """Write data as JSON."""
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-
-def _write_properties(path: Path, data: dict[str, Any]) -> None:
-    """Write data as Java .properties."""
-    with path.open("w", encoding="utf-8") as f:
-        for key, value in sorted(data.items()):
-            # Escape special characters
-            val_str = str(value)
-            val_str = (
-                val_str.replace("\\", "\\\\")
-                .replace("\n", "\\n")
-                .replace("\t", "\\t")
-                .replace("=", "\\=")
-                .replace(":", "\\:")
-            )
-            f.write(f"{key}={val_str}\n")
-
-
-def _write_yaml(path: Path, data: dict[str, Any]) -> None:
-    """Write data as YAML."""
-    if not HAS_YAML:
-        print("Error: PyYAML not installed, cannot write YAML", file=sys.stderr)
-        return
-    with path.open("w", encoding="utf-8") as f:
-        _yaml.safe_dump(data, f, default_flow_style=False)
-
-
-def _write_toml(path: Path, data: dict[str, Any]) -> None:
-    """Write data as TOML."""
-    print("Error: Writing TOML is not supported (no safe serializer)", file=sys.stderr)
-
-
-WRITERS = {
-    ".json": _write_json,
-    ".properties": _write_properties,
-    ".yaml": _write_yaml,
-    ".yml": _write_yaml,
-    ".toml": _write_toml,
-}
-
-
 def diff_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
     """Run the diff command."""
     root = Path(args.configs_root)
@@ -444,42 +422,50 @@ def diff_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
         return 1
 
     environments = [e.strip() for e in args.environments.split(",")]
+
+    # Validate environment names
+    for env in environments:
+        if not validate_env_name(env):
+            print(
+                f"Error: Invalid environment name '{env}'. "
+                "Use only alphanumeric, underscore, or hyphen.",
+                file=sys.stderr,
+            )
+            return 1
+
     found = find_config_files(root, environments)
 
     if not found:
         print("No config files found.", file=sys.stderr)
         return 1
 
-    env_configs: dict[str, dict[str, Any]] = {}
+    # Build per-file, per-environment config map
+    env_file_configs: dict[str, dict[str, dict[str, Any]]] = {}
     file_names: set[str] = set()
-
     for env in environments:
-        files = found.get(env, [])
-        combined: dict[str, Any] = {}
-        for f in files:
+        env_file_configs[env] = {}
+        for f in found.get(env, []):
             file_names.add(f.name)
             loaded = load_config(f)
             if loaded:
-                combined.update(flatten(loaded))
-        env_configs[env] = combined
+                env_file_configs[env][f.name] = flatten(loaded)
 
-    drifts = compare_environments(env_configs, secret_pattern)
+    file_drifts = compare_environments(env_file_configs, secret_pattern)
+
     summary = {
         "files_compared": len(file_names),
-        "drifts_found": len(drifts),
-        "missing_keys": sum(1 for d in drifts if d["missing_in"]),
+        "drifts_found": sum(len(d) for d in file_drifts.values()),
+        "missing_keys": sum(
+            sum(1 for d in drifts if d["missing_in"]) for drifts in file_drifts.values()
+        ),
     }
 
-    file_groups = {}
-    for file_name in sorted(file_names):
-        file_groups[file_name] = {"__all__": drifts}
-
     if args.output_format == "terminal":
-        report = generate_terminal_report(str(root), environments, file_groups, summary)
+        report = generate_terminal_report(str(root), environments, file_drifts, summary)
     elif args.output_format == "json":
-        report = generate_json_report(str(root), environments, file_groups, summary)
+        report = generate_json_report(str(root), environments, file_drifts, summary)
     elif args.output_format == "markdown":
-        report = generate_markdown_report(str(root), environments, file_groups, summary)
+        report = generate_markdown_report(str(root), environments, file_drifts, summary)
     else:
         print(f"Error: Unknown format {args.output_format}", file=sys.stderr)
         return 1
@@ -490,7 +476,7 @@ def diff_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
     else:
         print(report)
 
-    return 1 if (args.fail_on_drift and drifts) else 0
+    return 1 if (args.fail_on_drift and file_drifts) else 0
 
 
 def apply_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
@@ -500,40 +486,29 @@ def apply_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
         print(f"Error: {root} is not a directory", file=sys.stderr)
         return 1
 
+    # Validate environment names
+    for env in [args.source, args.target]:
+        if not validate_env_name(env):
+            print(
+                f"Error: Invalid environment name '{env}'. "
+                "Use only alphanumeric, underscore, or hyphen.",
+                file=sys.stderr,
+            )
+            return 1
+
     source = args.source
     target = args.target
     found = find_config_files(root, [source, target])
 
+    if source not in found:
+        print(f"Error: Source environment '{source}' not found.", file=sys.stderr)
+        return 1
+    if target not in found:
+        print(f"Error: Target environment '{target}' not found.", file=sys.stderr)
+        return 1
+
     source_files = {f.name: f for f in found.get(source, [])}
     target_files = {f.name: f for f in found.get(target, [])}
-
-    changes: list[dict[str, Any]] = []
-    for file_name, source_path in source_files.items():
-        if file_name not in target_files:
-            continue
-        target_path = target_files[file_name]
-        source_flat = flatten(load_config(source_path))
-        target_flat = flatten(load_config(target_path))
-
-        for key, value in sorted(source_flat.items()):
-            if key not in target_flat:
-                if is_secret_key(key, secret_pattern) and not args.include_secrets:
-                    continue
-                changes.append({"file": file_name, "key": key, "value": value})
-
-    if not changes:
-        print("No missing keys to apply.")
-        return 0
-
-    print("The following changes will be applied:")
-    for change in changes:
-        print(f"  {change['file']}: {change['key']} = {change['value']}")
-
-    if not args.yes:
-        response = input("Proceed? [y/N] ").strip().lower()
-        if response != "y":
-            print("Aborted.")
-            return 0
 
     # Actually write the changes to target files
     applied_count = 0
@@ -564,11 +539,26 @@ def apply_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
         if applied_count > 0:
             # Write the updated config
             ext = target_path.suffix.lower()
-            writer = WRITERS.get(ext)
-            if writer:
-                writer(target_path, target_config)
-            else:
-                print(f"Warning: Cannot write {ext} format, skipping {target_path}")
+            if ext == ".json":
+                with target_path.open("w", encoding="utf-8") as f:
+                    json.dump(target_config, f, indent=2)
+                    f.write("\n")
+            elif ext == ".properties":
+                with target_path.open("w", encoding="utf-8") as f:
+                    for k, v in sorted(flatten(target_config).items()):
+                        f.write(f"{k}={v}\n")
+            elif ext in (".yaml", ".yml"):
+                if HAS_YAML:
+                    with target_path.open("w", encoding="utf-8") as f:
+                        _yaml.safe_dump(target_config, f, default_flow_style=False)
+                else:
+                    print("Error: PyYAML not installed", file=sys.stderr)
+            elif ext == ".toml":
+                print("Error: Writing TOML is not supported", file=sys.stderr)
+
+    if applied_count == 0:
+        print("No missing keys to apply.")
+        return 0
 
     print(f"Applied {applied_count} changes to {target} environment.")
     return 0
@@ -657,7 +647,7 @@ def main() -> None:
 
     # Compile custom secret pattern if provided
     secret_pattern = SECRET_PATTERN
-    if args.secret_pattern:
+    if args.command and args.secret_pattern:
         secret_pattern = re.compile(args.secret_pattern, re.IGNORECASE)
 
     if args.command == "diff":

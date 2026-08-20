@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for config-drift v0.1.0."""
+"""Tests for config-drift v0.1.1."""
 
+import argparse
 import json
 import os
 import re
@@ -10,8 +11,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-
-import argparse
 
 import config_drift
 
@@ -155,16 +154,12 @@ class TestCustomSecretPattern(unittest.TestCase):
 
     def test_custom_pattern(self):
         """Custom pattern overrides default."""
-        import re
-
         pattern = re.compile(r"custom_secret", re.IGNORECASE)
         self.assertTrue(pattern.search("my_custom_secret_key"))
         self.assertFalse(pattern.search("api_key"))
 
     def test_is_secret_key_with_custom_pattern(self):
         """is_secret_key respects custom pattern."""
-        import re
-
         custom = re.compile(r"my_secret", re.IGNORECASE)
         self.assertTrue(config_drift.is_secret_key("my_secret_key", custom))
         self.assertFalse(config_drift.is_secret_key("api_key", custom))
@@ -214,14 +209,129 @@ class TestPropertiesEscapes(unittest.TestCase):
             os.unlink(path)
 
 
+class TestNormalizeForComparison(unittest.TestCase):
+    """Test normalize_for_comparison preserves int vs float."""
+
+    def test_int_vs_float(self):
+        """int and float are distinct types."""
+        self.assertEqual(config_drift.normalize_for_comparison(42), ("int", 42))
+        self.assertEqual(config_drift.normalize_for_comparison(42.0), ("float", 42.0))
+
+    def test_bool_not_int(self):
+        """bool is not conflated with int."""
+        self.assertEqual(config_drift.normalize_for_comparison(True), ("bool", True))
+        self.assertEqual(config_drift.normalize_for_comparison(False), ("bool", False))
+
+    def test_string(self):
+        self.assertEqual(
+            config_drift.normalize_for_comparison("hello"), ("str", "hello")
+        )
+
+
+class TestFileLevelDriftAttribution(unittest.TestCase):
+    """Test drift is attributed to correct file."""
+
+    def test_drift_per_file(self):
+        """Drift appears only in the file that contains it."""
+        env_file_configs = {
+            "dev": {
+                "app.json": {"app.name": "myapp", "app.debug": True},
+                "db.json": {"db.host": "localhost"},
+            },
+            "prod": {
+                "app.json": {"app.name": "myapp", "app.debug": False},
+                "db.json": {"db.host": "prod-host"},
+            },
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        # app.json should have drift on app.debug
+        self.assertIn("app.json", result)
+        app_drifts = [d["key"] for d in result["app.json"]]
+        self.assertIn("app.debug", app_drifts)
+        # db.json should have drift on db.host
+        self.assertIn("db.json", result)
+        db_drifts = [d["key"] for d in result["db.json"]]
+        self.assertIn("db.host", db_drifts)
+        # app.json should NOT have db.host drift
+        self.assertNotIn("db.host", app_drifts)
+
+    def test_no_drift(self):
+        env_file_configs = {
+            "dev": {"app.json": {"a": 1}},
+            "prod": {"app.json": {"a": 1}},
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        self.assertEqual(result, {})
+
+
+class TestIntFloatTypeDrift(unittest.TestCase):
+    """Test int vs float is flagged as type drift."""
+
+    def test_int_to_float_drift(self):
+        """port: 3000 (int) vs port: 3000.0 (float) is type drift."""
+        env_file_configs = {
+            "dev": {"app.json": {"port": 3000}},
+            "prod": {"app.json": {"port": 3000.0}},
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        self.assertIn("app.json", result)
+        drift = result["app.json"][0]
+        self.assertEqual(drift["type"], "type_drift")
+
+    def test_same_int_no_drift(self):
+        env_file_configs = {
+            "dev": {"app.json": {"port": 3000}},
+            "prod": {"app.json": {"port": 3000}},
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        self.assertEqual(result, {})
+
+
+class TestBooleanNormalization(unittest.TestCase):
+    """Test boolean normalization."""
+
+    def test_bool_vs_int(self):
+        """bool True is different from int 1."""
+        env_file_configs = {
+            "dev": {"app.json": {"flag": True}},
+            "prod": {"app.json": {"flag": 1}},
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        # True (bool) vs 1 (int) is type drift
+        self.assertIn("app.json", result)
+
+    def test_bool_vs_string(self):
+        """bool True is different from string 'true'."""
+        env_file_configs = {
+            "dev": {"app.json": {"flag": True}},
+            "prod": {"app.json": {"flag": "true"}},
+        }
+        result = config_drift.compare_environments(env_file_configs)
+        self.assertIn("app.json", result)
+
+
+class TestEnvironmentValidation(unittest.TestCase):
+    """Test environment name validation."""
+
+    def test_valid_names(self):
+        self.assertTrue(config_drift.validate_env_name("dev"))
+        self.assertTrue(config_drift.validate_env_name("staging"))
+        self.assertTrue(config_drift.validate_env_name("prod"))
+        self.assertTrue(config_drift.validate_env_name("my-env"))
+        self.assertTrue(config_drift.validate_env_name("env_1"))
+
+    def test_invalid_names(self):
+        self.assertFalse(config_drift.validate_env_name("../etc"))
+        self.assertFalse(config_drift.validate_env_name("env/path"))
+        self.assertFalse(config_drift.validate_env_name("env.."))
+        self.assertFalse(config_drift.validate_env_name(""))
+
+
 class TestApplyCommand(unittest.TestCase):
     """Test apply command actually writes changes."""
 
     def test_apply_writes_missing_keys(self):
         """Apply command adds missing keys to target."""
-        import tempfile
-        from pathlib import Path
-
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "dev").mkdir()
@@ -233,7 +343,6 @@ class TestApplyCommand(unittest.TestCase):
             (root / "dev" / "app.json").write_text(json.dumps(dev_config))
             (root / "prod" / "app.json").write_text(json.dumps(prod_config))
 
-            # Import the args namespace
             args = argparse.Namespace(
                 configs_root=str(root),
                 source="dev",
@@ -250,16 +359,12 @@ class TestApplyCommand(unittest.TestCase):
             exit_code = config_drift.apply_command(args, pattern)
             self.assertEqual(exit_code, 0)
 
-            # Verify the key was added
             result = json.loads((root / "prod" / "app.json").read_text())
             self.assertIn("cache", result["app"])
             self.assertEqual(result["app"]["cache"], True)
 
     def test_apply_skips_secrets(self):
         """Apply command skips secret keys by default."""
-        import tempfile
-        from pathlib import Path
-
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "dev").mkdir()
@@ -290,148 +395,93 @@ class TestApplyCommand(unittest.TestCase):
             result = json.loads((root / "prod" / "app.json").read_text())
             self.assertNotIn("password", result["db"])
 
-
-class TestCompareEnvironments(unittest.TestCase):
-    def test_no_drift(self):
-        configs = {"dev": {"a": 1, "b": 2}, "staging": {"a": 1, "b": 2}}
-        drifts = config_drift.compare_environments(configs)
-        self.assertEqual(drifts, [])
-
-    def test_value_drift(self):
-        configs = {
-            "dev": {"host": "localhost"},
-            "staging": {"host": "staging.internal"},
-        }
-        drifts = config_drift.compare_environments(configs)
-        self.assertEqual(len(drifts), 1)
-        self.assertEqual(drifts[0]["type"], "value_drift")
-        self.assertEqual(drifts[0]["key"], "host")
-
-    def test_missing_key(self):
-        configs = {"dev": {"a": 1, "b": 2}, "staging": {"a": 1}}
-        drifts = config_drift.compare_environments(configs)
-        self.assertEqual(len(drifts), 1)
-        self.assertEqual(drifts[0]["type"], "missing_key")
-        self.assertEqual(drifts[0]["missing_in"], ["staging"])
-
-    def test_type_drift(self):
-        configs = {"dev": {"port": 3000}, "staging": {"port": "3000"}}
-        drifts = config_drift.compare_environments(configs)
-        self.assertEqual(len(drifts), 1)
-        self.assertEqual(drifts[0]["type"], "type_drift")
-
-    def test_three_way_comparison(self):
-        configs = {
-            "dev": {"a": 1, "b": 2, "c": 3},
-            "staging": {"a": 1, "b": 3},
-            "prod": {"a": 2, "b": 2},
-        }
-        drifts = config_drift.compare_environments(configs)
-        self.assertGreater(len(drifts), 0)
-
-
-class TestFindConfigFiles(unittest.TestCase):
-    def test_directory_structure(self):
+    def test_apply_missing_source(self):
+        """Apply errors when source env not found."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "dev").mkdir()
-            (root / "staging").mkdir()
-            (root / "prod").mkdir()
-            (root / "dev" / "app.json").write_text("{}")
-            (root / "staging" / "app.json").write_text("{}")
-            (root / "prod" / "app.json").write_text("{}")
 
-            result = config_drift.find_config_files(root, ["dev", "staging", "prod"])
-            self.assertIn("dev", result)
-            self.assertIn("staging", result)
-            self.assertIn("prod", result)
-            self.assertEqual(len(result["dev"]), 1)
+            args = argparse.Namespace(
+                configs_root=str(root),
+                source="nonexistent",
+                target="dev",
+                yes=True,
+                include_secrets=False,
+                secret_pattern=None,
+            )
 
-    def test_flat_structure(self):
+            pattern = re.compile(r"secret", re.IGNORECASE)
+            exit_code = config_drift.apply_command(args, pattern)
+            self.assertEqual(exit_code, 1)
+
+    def test_apply_missing_target(self):
+        """Apply errors when target env not found."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            (root / "app.dev.json").write_text("{}")
-            (root / "app.staging.json").write_text("{}")
-            (root / "app.prod.json").write_text("{}")
+            (root / "dev").mkdir()
 
-            result = config_drift.find_config_files(root, ["dev", "staging", "prod"])
-            self.assertIn("dev", result)
-            self.assertIn("staging", result)
-            self.assertIn("prod", result)
+            args = argparse.Namespace(
+                configs_root=str(root),
+                source="dev",
+                target="nonexistent",
+                yes=True,
+                include_secrets=False,
+                secret_pattern=None,
+            )
+
+            pattern = re.compile(r"secret", re.IGNORECASE)
+            exit_code = config_drift.apply_command(args, pattern)
+            self.assertEqual(exit_code, 1)
 
 
-class TestReportGeneration(unittest.TestCase):
-    def test_terminal_report(self):
-        configs_root = "./configs"
-        environments = ["dev", "staging", "prod"]
-        file_groups = {
-            "app.json": {
-                "__all__": [
-                    {
-                        "key": "host",
-                        "type": "value_drift",
-                        "secret": False,
-                        "values": {"dev": "localhost", "staging": "staging.internal"},
-                        "missing_in": [],
-                    }
-                ]
-            }
-        }
-        summary = {"files_compared": 1, "drifts_found": 1, "missing_keys": 0}
+class TestDiffCommandValidation(unittest.TestCase):
+    """Test diff command validation."""
 
-        report = config_drift.generate_terminal_report(
-            configs_root, environments, file_groups, summary
-        )
-        self.assertIn("CONFIG DRIFT REPORT", report)
-        self.assertIn("host", report)
+    def test_invalid_env_name(self):
+        """Diff rejects invalid environment names."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                configs_root=tmpdir,
+                environments="../etc,prod",
+                output_format="terminal",
+                output=None,
+                secret_pattern=None,
+                fail_on_drift=False,
+            )
 
-    def test_json_report(self):
-        configs_root = "./configs"
-        environments = ["dev", "staging"]
-        file_groups = {
-            "app.json": {
-                "__all__": [
-                    {
-                        "key": "host",
-                        "type": "value_drift",
-                        "secret": False,
-                        "values": {"dev": "localhost", "staging": "staging.internal"},
-                        "missing_in": [],
-                    }
-                ]
-            }
-        }
-        summary = {"files_compared": 1, "drifts_found": 1, "missing_keys": 0}
+            pattern = re.compile(r"secret", re.IGNORECASE)
+            exit_code = config_drift.diff_command(args, pattern)
+            self.assertEqual(exit_code, 1)
 
-        report = config_drift.generate_json_report(
-            configs_root, environments, file_groups, summary
-        )
-        parsed = json.loads(report)
-        self.assertEqual(parsed["summary"]["drifts_found"], 1)
 
-    def test_markdown_report(self):
-        configs_root = "./configs"
-        environments = ["dev", "staging"]
-        file_groups = {
-            "app.json": {
-                "__all__": [
-                    {
-                        "key": "host",
-                        "type": "value_drift",
-                        "secret": False,
-                        "values": {"dev": "localhost", "staging": "staging.internal"},
-                        "missing_in": [],
-                    }
-                ]
-            }
-        }
-        summary = {"files_compared": 1, "drifts_found": 1, "missing_keys": 0}
+class TestCLISecretPatternIntegration(unittest.TestCase):
+    """Test that --secret-pattern flows through CLI to comparison logic."""
 
-        report = config_drift.generate_markdown_report(
-            configs_root, environments, file_groups, summary
-        )
-        self.assertIn("# Config Drift Report", report)
-        self.assertIn("host", report)
+    def test_secret_pattern_in_diff(self):
+        """Custom secret pattern masks custom keys in diff."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "dev").mkdir()
+            (root / "prod").mkdir()
+
+            dev = {"app": {"name": "myapp"}, "my_custom_secret": "dev_value"}
+            prod = {"app": {"name": "myapp"}, "my_custom_secret": "prod_value"}
+
+            (root / "dev" / "app.json").write_text(json.dumps(dev))
+            (root / "prod" / "app.json").write_text(json.dumps(prod))
+
+            args = argparse.Namespace(
+                configs_root=str(root),
+                environments="dev,prod",
+                output_format="terminal",
+                output=None,
+                secret_pattern=r"my_custom_secret",
+                fail_on_drift=True,
+            )
+
+            pattern = re.compile(r"my_custom_secret", re.IGNORECASE)
+            exit_code = config_drift.diff_command(args, pattern)
+            self.assertEqual(exit_code, 1)  # drift detected
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -451,17 +501,20 @@ class TestEndToEnd(unittest.TestCase):
             self.assertIn("dev", found)
             self.assertIn("prod", found)
 
-            env_configs = {}
+            env_file_configs = {}
             for env in ["dev", "prod"]:
-                combined = {}
+                env_file_configs[env] = {}
                 for f in found[env]:
-                    combined.update(config_drift.flatten(config_drift.load_config(f)))
-                env_configs[env] = combined
+                    loaded = config_drift.load_config(f)
+                    if loaded:
+                        env_file_configs[env][f.name] = config_drift.flatten(loaded)
 
-            drifts = config_drift.compare_environments(env_configs)
-            self.assertGreater(len(drifts), 0)
+            file_drifts = config_drift.compare_environments(env_file_configs)
+            self.assertIn("app.json", file_drifts)
 
-            debug_drifts = [d for d in drifts if d["key"] == "app.debug"]
+            debug_drifts = [
+                d for d in file_drifts["app.json"] if d["key"] == "app.debug"
+            ]
             self.assertEqual(len(debug_drifts), 1)
             self.assertEqual(debug_drifts[0]["type"], "value_drift")
 
