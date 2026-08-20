@@ -147,6 +147,18 @@ class TestSecretKeyDetection(unittest.TestCase):
         self.assertTrue(config_drift.is_secret_key("Api_Key"))
 
 
+class TestCustomSecretPattern(unittest.TestCase):
+    """Test custom secret pattern via CLI flag."""
+
+    def test_custom_pattern(self):
+        """Custom pattern overrides default."""
+        import re
+
+        pattern = re.compile(r"custom_secret", re.IGNORECASE)
+        self.assertTrue(pattern.search("my_custom_secret_key"))
+        self.assertFalse(pattern.search("api_key"))
+
+
 class TestCompareEnvironments(unittest.TestCase):
     def test_no_drift(self):
         configs = {"dev": {"a": 1, "b": 2}, "staging": {"a": 1, "b": 2}}

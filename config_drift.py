@@ -211,10 +211,14 @@ def compare_environments(
         first_env = next(iter(normalized_values))
         first_normalized = normalized_values[first_env]
         has_value_drift = any(
-            v != first_normalized for env, v in normalized_values.items() if env != first_env
+            v != first_normalized
+            for env, v in normalized_values.items()
+            if env != first_env
         )
 
-        type_names: dict[str, str] = {env: type(v).__name__ for env, v in present.items()}
+        type_names: dict[str, str] = {
+            env: type(v).__name__ for env, v in present.items()
+        }
         has_type_drift = len(set(type_names.values())) > 1
 
         if has_value_drift or has_type_drift or missing:
@@ -378,6 +382,10 @@ def diff_command(args: argparse.Namespace) -> int:
                 combined.update(flatten(loaded))
         env_configs[env] = combined
 
+    if args.secret_pattern:
+        global SECRET_PATTERN
+        SECRET_PATTERN = re.compile(args.secret_pattern, re.IGNORECASE)
+
     drifts = compare_environments(env_configs)
     summary = {
         "files_compared": len(file_names),
@@ -422,6 +430,10 @@ def apply_command(args: argparse.Namespace) -> int:
     source_files = {f.name: f for f in found.get(source, [])}
     target_files = {f.name: f for f in found.get(target, [])}
 
+    if args.secret_pattern:
+        global SECRET_PATTERN
+        SECRET_PATTERN = re.compile(args.secret_pattern, re.IGNORECASE)
+
     changes = []
     for file_name, source_path in source_files.items():
         if file_name not in target_files:
@@ -458,11 +470,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="config-drift - Detect configuration drift across environments"
     )
-    parser.add_argument("--version", action="version", version=f"config-drift {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"config-drift {__version__}"
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="command to execute")
 
-    diff_parser = subparsers.add_parser("diff", help="detect drift between environments")
+    diff_parser = subparsers.add_parser(
+        "diff", help="detect drift between environments"
+    )
     diff_parser.add_argument(
         "--configs-root",
         required=True,
@@ -483,6 +499,11 @@ def main() -> None:
         "--output",
         default=None,
         help="write report to file instead of stdout",
+    )
+    diff_parser.add_argument(
+        "--secret-pattern",
+        default=None,
+        help="custom regex pattern for secret key detection",
     )
     diff_parser.add_argument(
         "--fail-on-drift",
@@ -517,6 +538,11 @@ def main() -> None:
         "--include-secrets",
         action="store_true",
         help="allow secret-looking keys to be copied (dangerous)",
+    )
+    apply_parser.add_argument(
+        "--secret-pattern",
+        default=None,
+        help="custom regex pattern for secret key detection",
     )
 
     args = parser.parse_args()

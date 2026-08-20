@@ -44,17 +44,17 @@ python config_drift.py apply --configs-root ./examples/configs --source dev --ta
 |--------|-----------|--------|
 | JSON | `.json` | stdlib `json` |
 | Properties | `.properties` | custom parser |
-| TOML | `.toml` | `tomllib` (3.11+) or `tomli` |
+| TOML | `.toml` | `tomllib` (3.11+) or `tomli` (optional) |
 | YAML | `.yaml`, `.yml` | `PyYAML` (optional) |
 
-YAML/TOML parsers are optional. If not installed, those files are skipped with a warning.
+YAML/TOML parsers are optional. If not installed, those files are skipped with a warning. We recommend installing `tomli` for Python < 3.11: `pip install tomli`.
 
 ## CLI Usage
 
 ```
-python config_drift.py diff --configs-root PATH --environments ENV1,ENV2 [--output-format terminal|json|markdown] [--output PATH] [--fail-on-drift]
+python config_drift.py diff --configs-root PATH --environments ENV1,ENV2 [--output-format terminal|json|markdown] [--output PATH] [--fail-on-drift] [--secret-pattern REGEX]
 
-python config_drift.py apply --configs-root PATH --source ENV --target ENV [--yes] [--include-secrets]
+python config_drift.py apply --configs-root PATH --source ENV --target ENV [--yes] [--include-secrets] [--secret-pattern REGEX]
 ```
 
 ## Secret Detection
