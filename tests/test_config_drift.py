@@ -11,8 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 
-import config_drift
 import argparse
+
+import config_drift
 
 
 class TestLoadJson(unittest.TestCase):
@@ -219,7 +220,6 @@ class TestApplyCommand(unittest.TestCase):
     def test_apply_writes_missing_keys(self):
         """Apply command adds missing keys to target."""
         import tempfile
-        import os
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -258,7 +258,6 @@ class TestApplyCommand(unittest.TestCase):
     def test_apply_skips_secrets(self):
         """Apply command skips secret keys by default."""
         import tempfile
-        import os
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as tmpdir:
