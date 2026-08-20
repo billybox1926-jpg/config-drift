@@ -165,8 +165,7 @@ def find_config_files(root: Path, environments: list[str]) -> dict[str, list[Pat
             files = sorted(
                 p
                 for p in root.glob("*")
-                if p.suffix.lower() in SUPPORTED_FORMATS
-                and f".{env}" in p.stem
+                if p.suffix.lower() in SUPPORTED_FORMATS and f".{env}" in p.stem
             )
             if files:
                 result[env] = files
