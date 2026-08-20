@@ -75,7 +75,19 @@ def load_properties(path: Path) -> dict[str, Any]:
 
 
 def _parse_properties_value(value: str) -> Any:
-    """Attempt to parse a .properties value as a Python type."""
+    """Attempt to parse a .properties value as a Python type.
+
+    Handles Java .properties escape sequences: \\n, \\t, \\=, \\: \\\\
+    """
+    # Handle escape sequences
+    if "\\" in value:
+        value = (
+            value.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\=", "=")
+            .replace("\\:", ":")
+            .replace("\\\\", "\\")
+        )
     if value.lower() == "true":
         return True
     if value.lower() == "false":
@@ -106,7 +118,16 @@ def load_yaml(path: Path) -> dict[str, Any]:
         print(f"Warning: No YAML parser available, skipping {path}", file=sys.stderr)
         return {}
     with path.open("r", encoding="utf-8") as f:
-        return _yaml.safe_load(f) or {}
+        data = _yaml.safe_load(f)
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            print(
+                f"Warning: YAML root in {path} is not a mapping, skipping",
+                file=sys.stderr,
+            )
+            return {}
+        return data
 
 
 LOADERS = {
@@ -144,9 +165,9 @@ def flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
     return items
 
 
-def is_secret_key(key: str) -> bool:
+def is_secret_key(key: str, pattern: re.Pattern = SECRET_PATTERN) -> bool:
     """Check if a key looks like a secret."""
-    return bool(SECRET_PATTERN.search(key))
+    return bool(pattern.search(key))
 
 
 def find_config_files(root: Path, environments: list[str]) -> dict[str, list[Path]]:
@@ -184,6 +205,7 @@ def normalize_for_comparison(value: Any) -> Any:
 
 def compare_environments(
     configs: dict[str, dict[str, Any]],
+    secret_pattern: re.Pattern = SECRET_PATTERN,
 ) -> list[dict[str, Any]]:
     """Compare flattened configs across environments."""
     all_keys: set[str] = set()
@@ -223,7 +245,7 @@ def compare_environments(
         if has_value_drift or has_type_drift or missing:
             formatted_values = {}
             for env, v in present.items():
-                if is_secret_key(key):
+                if is_secret_key(key, secret_pattern):
                     formatted_values[env] = "***"
                 elif has_type_drift:
                     formatted_values[env] = f"{v} ({type_names[env]})"
@@ -240,7 +262,7 @@ def compare_environments(
             entry = {
                 "key": key,
                 "type": entry_type,
-                "secret": is_secret_key(key),
+                "secret": is_secret_key(key, secret_pattern),
                 "values": formatted_values,
                 "missing_in": sorted(missing),
             }
@@ -354,7 +376,67 @@ def generate_markdown_report(
     return "\n".join(lines)
 
 
-def diff_command(args: argparse.Namespace) -> int:
+def _unflatten(flat: dict[str, Any]) -> dict[str, Any]:
+    """Convert dot-notation keys back to nested dict."""
+    result: dict[str, Any] = {}
+    for key, value in flat.items():
+        parts = key.split(".")
+        current = result
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+    return result
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write data as JSON."""
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def _write_properties(path: Path, data: dict[str, Any]) -> None:
+    """Write data as Java .properties."""
+    with path.open("w", encoding="utf-8") as f:
+        for key, value in sorted(data.items()):
+            # Escape special characters
+            val_str = str(value)
+            val_str = (
+                val_str.replace("\\", "\\\\")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t")
+                .replace("=", "\\=")
+                .replace(":", "\\:")
+            )
+            f.write(f"{key}={val_str}\n")
+
+
+def _write_yaml(path: Path, data: dict[str, Any]) -> None:
+    """Write data as YAML."""
+    if not HAS_YAML:
+        print("Error: PyYAML not installed, cannot write YAML", file=sys.stderr)
+        return
+    with path.open("w", encoding="utf-8") as f:
+        _yaml.safe_dump(data, f, default_flow_style=False)
+
+
+def _write_toml(path: Path, data: dict[str, Any]) -> None:
+    """Write data as TOML."""
+    print("Error: Writing TOML is not supported (no safe serializer)", file=sys.stderr)
+
+
+WRITERS = {
+    ".json": _write_json,
+    ".properties": _write_properties,
+    ".yaml": _write_yaml,
+    ".yml": _write_yaml,
+    ".toml": _write_toml,
+}
+
+
+def diff_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
     """Run the diff command."""
     root = Path(args.configs_root)
     if not root.is_dir():
@@ -381,11 +463,7 @@ def diff_command(args: argparse.Namespace) -> int:
                 combined.update(flatten(loaded))
         env_configs[env] = combined
 
-    if args.secret_pattern:
-        global SECRET_PATTERN
-        SECRET_PATTERN = re.compile(args.secret_pattern, re.IGNORECASE)
-
-    drifts = compare_environments(env_configs)
+    drifts = compare_environments(env_configs, secret_pattern)
     summary = {
         "files_compared": len(file_names),
         "drifts_found": len(drifts),
@@ -415,7 +493,7 @@ def diff_command(args: argparse.Namespace) -> int:
     return 1 if (args.fail_on_drift and drifts) else 0
 
 
-def apply_command(args: argparse.Namespace) -> int:
+def apply_command(args: argparse.Namespace, secret_pattern: re.Pattern) -> int:
     """Run the apply command."""
     root = Path(args.configs_root)
     if not root.is_dir():
@@ -429,11 +507,7 @@ def apply_command(args: argparse.Namespace) -> int:
     source_files = {f.name: f for f in found.get(source, [])}
     target_files = {f.name: f for f in found.get(target, [])}
 
-    if args.secret_pattern:
-        global SECRET_PATTERN
-        SECRET_PATTERN = re.compile(args.secret_pattern, re.IGNORECASE)
-
-    changes = []
+    changes: list[dict[str, Any]] = []
     for file_name, source_path in source_files.items():
         if file_name not in target_files:
             continue
@@ -443,7 +517,7 @@ def apply_command(args: argparse.Namespace) -> int:
 
         for key, value in sorted(source_flat.items()):
             if key not in target_flat:
-                if is_secret_key(key) and not args.include_secrets:
+                if is_secret_key(key, secret_pattern) and not args.include_secrets:
                     continue
                 changes.append({"file": file_name, "key": key, "value": value})
 
@@ -461,7 +535,42 @@ def apply_command(args: argparse.Namespace) -> int:
             print("Aborted.")
             return 0
 
-    print(f"Applied {len(changes)} changes to {target} environment.")
+    # Actually write the changes to target files
+    applied_count = 0
+    for file_name, source_path in source_files.items():
+        if file_name not in target_files:
+            continue
+        target_path = target_files[file_name]
+        source_config = load_config(source_path)
+        target_config = load_config(target_path)
+
+        # Add missing keys
+        source_flat = flatten(source_config)
+        target_flat = flatten(target_config)
+        for key, value in sorted(source_flat.items()):
+            if key not in target_flat:
+                if is_secret_key(key, secret_pattern) and not args.include_secrets:
+                    continue
+                # Set the value in target_config
+                parts = key.split(".")
+                current = target_config
+                for part in parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                current[parts[-1]] = value
+                applied_count += 1
+
+        if applied_count > 0:
+            # Write the updated config
+            ext = target_path.suffix.lower()
+            writer = WRITERS.get(ext)
+            if writer:
+                writer(target_path, target_config)
+            else:
+                print(f"Warning: Cannot write {ext} format, skipping {target_path}")
+
+    print(f"Applied {applied_count} changes to {target} environment.")
     return 0
 
 
@@ -545,10 +654,16 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Compile custom secret pattern if provided
+    secret_pattern = SECRET_PATTERN
+    if args.secret_pattern:
+        secret_pattern = re.compile(args.secret_pattern, re.IGNORECASE)
+
     if args.command == "diff":
-        sys.exit(diff_command(args))
+        sys.exit(diff_command(args, secret_pattern))
     elif args.command == "apply":
-        sys.exit(apply_command(args))
+        sys.exit(apply_command(args, secret_pattern))
     else:
         parser.print_help()
         sys.exit(1)

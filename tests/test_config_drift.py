@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 
 import config_drift
+import argparse
 
 
 class TestLoadJson(unittest.TestCase):
@@ -157,6 +159,137 @@ class TestCustomSecretPattern(unittest.TestCase):
         pattern = re.compile(r"custom_secret", re.IGNORECASE)
         self.assertTrue(pattern.search("my_custom_secret_key"))
         self.assertFalse(pattern.search("api_key"))
+
+    def test_is_secret_key_with_custom_pattern(self):
+        """is_secret_key respects custom pattern."""
+        import re
+
+        custom = re.compile(r"my_secret", re.IGNORECASE)
+        self.assertTrue(config_drift.is_secret_key("my_secret_key", custom))
+        self.assertFalse(config_drift.is_secret_key("api_key", custom))
+
+
+class TestPropertiesEscapes(unittest.TestCase):
+    """Test .properties escape sequence handling."""
+
+    def test_newline_escape(self):
+        fd, path = tempfile.mkstemp(suffix=".properties")
+        try:
+            os.write(fd, b"path=line1\\nline2\n")
+            os.close(fd)
+            result = config_drift.load_properties(Path(path))
+            self.assertEqual(result["path"], "line1\nline2")
+        finally:
+            os.unlink(path)
+
+    def test_tab_escape(self):
+        fd, path = tempfile.mkstemp(suffix=".properties")
+        try:
+            os.write(fd, b"path=col1\\tcol2\n")
+            os.close(fd)
+            result = config_drift.load_properties(Path(path))
+            self.assertEqual(result["path"], "col1\tcol2")
+        finally:
+            os.unlink(path)
+
+    def test_escaped_equals(self):
+        fd, path = tempfile.mkstemp(suffix=".properties")
+        try:
+            os.write(fd, b"equation=1\\=2\n")
+            os.close(fd)
+            result = config_drift.load_properties(Path(path))
+            self.assertEqual(result["equation"], "1=2")
+        finally:
+            os.unlink(path)
+
+    def test_escaped_backslash(self):
+        fd, path = tempfile.mkstemp(suffix=".properties")
+        try:
+            os.write(fd, b"path=C\\\\Users\\\\foo\n")
+            os.close(fd)
+            result = config_drift.load_properties(Path(path))
+            self.assertEqual(result["path"], "C\\Users\\foo")
+        finally:
+            os.unlink(path)
+
+
+class TestApplyCommand(unittest.TestCase):
+    """Test apply command actually writes changes."""
+
+    def test_apply_writes_missing_keys(self):
+        """Apply command adds missing keys to target."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "dev").mkdir()
+            (root / "prod").mkdir()
+
+            dev_config = {"app": {"name": "myapp", "debug": True, "cache": True}}
+            prod_config = {"app": {"name": "myapp", "debug": False}}
+
+            (root / "dev" / "app.json").write_text(json.dumps(dev_config))
+            (root / "prod" / "app.json").write_text(json.dumps(prod_config))
+
+            # Import the args namespace
+            args = argparse.Namespace(
+                configs_root=str(root),
+                source="dev",
+                target="prod",
+                yes=True,
+                include_secrets=False,
+                secret_pattern=None,
+            )
+
+            pattern = re.compile(
+                r"(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|auth)",
+                re.IGNORECASE,
+            )
+            exit_code = config_drift.apply_command(args, pattern)
+            self.assertEqual(exit_code, 0)
+
+            # Verify the key was added
+            result = json.loads((root / "prod" / "app.json").read_text())
+            self.assertIn("cache", result["app"])
+            self.assertEqual(result["app"]["cache"], True)
+
+    def test_apply_skips_secrets(self):
+        """Apply command skips secret keys by default."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "dev").mkdir()
+            (root / "prod").mkdir()
+
+            dev_config = {"db": {"host": "localhost", "password": "secret123"}}
+            prod_config = {"db": {"host": "prod-host"}}
+
+            (root / "dev" / "app.json").write_text(json.dumps(dev_config))
+            (root / "prod" / "app.json").write_text(json.dumps(prod_config))
+
+            args = argparse.Namespace(
+                configs_root=str(root),
+                source="dev",
+                target="prod",
+                yes=True,
+                include_secrets=False,
+                secret_pattern=None,
+            )
+
+            pattern = re.compile(
+                r"(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|auth)",
+                re.IGNORECASE,
+            )
+            exit_code = config_drift.apply_command(args, pattern)
+            self.assertEqual(exit_code, 0)
+
+            result = json.loads((root / "prod" / "app.json").read_text())
+            self.assertNotIn("password", result["db"])
 
 
 class TestCompareEnvironments(unittest.TestCase):
